@@ -30,14 +30,9 @@
  * limitations under the License.
  */
 
+#include "common.h"
+
 #define LOG_TAG "Exec"
-
-#include "jni.h"
-#include <android/log.h>
-
-#define LOGI(...) do { __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__); } while(0)
-#define LOGW(...) do { __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__); } while(0)
-#define LOGE(...) do { __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__); } while(0)
 
 #include <sys/types.h>
 #include <sys/ioctl.h>
@@ -48,6 +43,8 @@
 #include <unistd.h>
 #include <termios.h>
 #include <signal.h>
+
+#include "termExec.h"
 
 static jclass class_fileDescriptor;
 static jfieldID field_fileDescriptor_descriptor;
@@ -72,6 +69,9 @@ public:
             free(mString);
         }
         mString = (char*) malloc(numChars + 1);
+        if (!mString) {
+            return;
+        }
         for (size_t i = 0; i < numChars; i++) {
             mString[i] = (char) o[i];
         }
@@ -85,8 +85,17 @@ private:
     char* mString;
 };
 
-static int create_subprocess(const char *cmd, const char *arg0, const char *arg1,
-    int* pProcessId)
+static int throwOutOfMemoryError(JNIEnv *env, const char *message)
+{
+    jclass exClass;
+    const char *className = "java/lang/OutOfMemoryError";
+
+    exClass = env->FindClass(className);
+    return env->ThrowNew(exClass, message);
+}
+
+static int create_subprocess(const char *cmd,
+    char *const argv[], char *const envp[], int* pProcessId)
 {
     char *devname;
     int ptm;
@@ -125,7 +134,13 @@ static int create_subprocess(const char *cmd, const char *arg0, const char *arg1
         dup2(pts, 1);
         dup2(pts, 2);
 
-        execl(cmd, cmd, arg0, arg1, NULL);
+        if (envp) {
+            for (; *envp; ++envp) {
+                putenv(*envp);
+            }
+        }
+
+        execv(cmd, argv);
         exit(-1);
     } else {
         *pProcessId = (int) pid;
@@ -135,7 +150,8 @@ static int create_subprocess(const char *cmd, const char *arg0, const char *arg1
 
 
 static jobject android_os_Exec_createSubProcess(JNIEnv *env, jobject clazz,
-    jstring cmd, jstring arg0, jstring arg1, jintArray processIdArray)
+    jstring cmd, jobjectArray args, jobjectArray envVars,
+    jintArray processIdArray)
 {
     const jchar* str = cmd ? env->GetStringCritical(cmd, 0) : 0;
     String8 cmd_8;
@@ -144,26 +160,66 @@ static jobject android_os_Exec_createSubProcess(JNIEnv *env, jobject clazz,
         env->ReleaseStringCritical(cmd, str);
     }
 
-    str = arg0 ? env->GetStringCritical(arg0, 0) : 0;
-    const char* arg0Str = 0;
-    String8 arg0_8;
-    if (str) {
-        arg0_8.set(str, env->GetStringLength(arg0));
-        env->ReleaseStringCritical(arg0, str);
-        arg0Str = arg0_8.string();
+    jsize size = args ? env->GetArrayLength(args) : 0;
+    char **argv = NULL;
+    String8 tmp_8;
+    if (size > 0) {
+        argv = (char **)malloc((size+1)*sizeof(char *));
+        if (!argv) {
+            throwOutOfMemoryError(env, "Couldn't allocate argv array");
+            return NULL;
+        }
+        for (int i = 0; i < size; ++i) {
+            jstring arg = reinterpret_cast<jstring>(env->GetObjectArrayElement(args, i));
+            str = env->GetStringCritical(arg, 0);
+            if (!str) {
+                throwOutOfMemoryError(env, "Couldn't get argument from array");
+                return NULL;
+            }
+            tmp_8.set(str, env->GetStringLength(arg));
+            env->ReleaseStringCritical(arg, str);
+            argv[i] = strdup(tmp_8.string());
+        }
+        argv[size] = NULL;
     }
 
-    str = arg1 ? env->GetStringCritical(arg1, 0) : 0;
-    const char* arg1Str = 0;
-    String8 arg1_8;
-    if (str) {
-        arg1_8.set(str, env->GetStringLength(arg1));
-        env->ReleaseStringCritical(arg1, str);
-        arg1Str = arg1_8.string();
+    size = envVars ? env->GetArrayLength(envVars) : 0;
+    char **envp = NULL;
+    if (size > 0) {
+        envp = (char **)malloc((size+1)*sizeof(char *));
+        if (!envp) {
+            throwOutOfMemoryError(env, "Couldn't allocate envp array");
+            return NULL;
+        }
+        for (int i = 0; i < size; ++i) {
+            jstring var = reinterpret_cast<jstring>(env->GetObjectArrayElement(envVars, i));
+            str = env->GetStringCritical(var, 0);
+            if (!str) {
+                throwOutOfMemoryError(env, "Couldn't get env var from array");
+                return NULL;
+            }
+            tmp_8.set(str, env->GetStringLength(var));
+            env->ReleaseStringCritical(var, str);
+            envp[i] = strdup(tmp_8.string());
+        }
+        envp[size] = NULL;
     }
 
     int procId;
-    int ptm = create_subprocess(cmd_8.string(), arg0Str, arg1Str, &procId);
+    int ptm = create_subprocess(cmd_8.string(), argv, envp, &procId);
+
+    if (argv) {
+        for (char **tmp = argv; *tmp; ++tmp) {
+            free(*tmp);
+        }
+        free(argv);
+    }
+    if (envp) {
+        for (char **tmp = envp; *tmp; ++tmp) {
+            free(*tmp);
+        }
+        free(envp);
+    }
 
     if (processIdArray) {
         int procIdLen = env->GetArrayLength(processIdArray);
@@ -209,6 +265,27 @@ static void android_os_Exec_setPtyWindowSize(JNIEnv *env, jobject clazz,
     sz.ws_ypixel = ypixel;
 
     ioctl(fd, TIOCSWINSZ, &sz);
+}
+
+static void android_os_Exec_setPtyUTF8Mode(JNIEnv *env, jobject clazz,
+    jobject fileDescriptor, jboolean utf8Mode)
+{
+    int fd;
+    struct termios tios;
+
+    fd = env->GetIntField(fileDescriptor, field_fileDescriptor_descriptor);
+
+    if (env->ExceptionOccurred() != NULL) {
+        return;
+    }
+
+    tcgetattr(fd, &tios);
+    if (utf8Mode) {
+        tios.c_iflag |= IUTF8;
+    } else {
+        tios.c_iflag &= ~IUTF8;
+    }
+    tcsetattr(fd, TCSANOW, &tios);
 }
 
 static int android_os_Exec_waitFor(JNIEnv *env, jobject clazz,
@@ -274,14 +351,14 @@ static int register_FileDescriptor(JNIEnv *env)
      return 0;
 }
 
-
 static const char *classPathName = "jackpal/androidterm/Exec";
-
 static JNINativeMethod method_table[] = {
-    { "createSubprocess", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[I)Ljava/io/FileDescriptor;",
+    { "createSubprocess", "(Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;[I)Ljava/io/FileDescriptor;",
         (void*) android_os_Exec_createSubProcess },
     { "setPtyWindowSize", "(Ljava/io/FileDescriptor;IIII)V",
         (void*) android_os_Exec_setPtyWindowSize},
+    { "setPtyUTF8Mode", "(Ljava/io/FileDescriptor;Z)V",
+        (void*) android_os_Exec_setPtyUTF8Mode},
     { "waitFor", "(I)I",
         (void*) android_os_Exec_waitFor},
     { "close", "(Ljava/io/FileDescriptor;)V",
@@ -290,80 +367,16 @@ static JNINativeMethod method_table[] = {
         (void*) android_os_Exec_hangupProcessGroup}
 };
 
-/*
- * Register several native methods for one class.
- */
-static int registerNativeMethods(JNIEnv* env, const char* className,
-    JNINativeMethod* gMethods, int numMethods)
-{
-    jclass clazz;
-
-    clazz = env->FindClass(className);
-    if (clazz == NULL) {
-        LOGE("Native registration unable to find class '%s'", className);
+int init_Exec(JNIEnv *env) {
+    if (register_FileDescriptor(env) < 0) {
+        LOGE("Failed to register class java/io/FileDescriptor");
         return JNI_FALSE;
     }
-    if (env->RegisterNatives(clazz, gMethods, numMethods) < 0) {
-        LOGE("RegisterNatives failed for '%s'", className);
+
+    if (!registerNativeMethods(env, classPathName, method_table,
+                 sizeof(method_table) / sizeof(method_table[0]))) {
         return JNI_FALSE;
     }
 
     return JNI_TRUE;
-}
-
-/*
- * Register native methods for all classes we know about.
- *
- * returns JNI_TRUE on success.
- */
-static int registerNatives(JNIEnv* env)
-{
-  if (!registerNativeMethods(env, classPathName, method_table,
-                 sizeof(method_table) / sizeof(method_table[0]))) {
-    return JNI_FALSE;
-  }
-
-  return JNI_TRUE;
-}
-
-
-// ----------------------------------------------------------------------------
-
-/*
- * This is called by the VM when the shared library is first loaded.
- */
-
-typedef union {
-    JNIEnv* env;
-    void* venv;
-} UnionJNIEnvToVoid;
-
-jint JNI_OnLoad(JavaVM* vm, void* reserved) {
-    UnionJNIEnvToVoid uenv;
-    uenv.venv = NULL;
-    jint result = -1;
-    JNIEnv* env = NULL;
-
-    LOGI("JNI_OnLoad");
-
-    if (vm->GetEnv(&uenv.venv, JNI_VERSION_1_4) != JNI_OK) {
-        LOGE("ERROR: GetEnv failed");
-        goto bail;
-    }
-    env = uenv.env;
-
-    if ((result = register_FileDescriptor(env)) < 0) {
-        LOGE("ERROR: registerFileDescriptor failed");
-        goto bail;
-    }
-
-    if (registerNatives(env) != JNI_TRUE) {
-        LOGE("ERROR: registerNatives failed");
-        goto bail;
-    }
-
-    result = JNI_VERSION_1_4;
-
-bail:
-    return result;
 }

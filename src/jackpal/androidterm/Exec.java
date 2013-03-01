@@ -30,7 +30,7 @@ import java.io.FileDescriptor;
 public class Exec
 {
     static {
-        System.loadLibrary("jackpal-androidterm2");
+        System.loadLibrary("jackpal-androidterm4");
     }
 
     /**
@@ -41,15 +41,16 @@ public class Exec
      * file descriptor.
      *
      * @param cmd The command to execute
-     * @param arg0 The first argument to the command, may be null
-     * @param arg1 the second argument to the command, may be null
+     * @param args An array of arguments to the command
+     * @param envVars An array of strings of the form "VAR=value" to be added
+     * to the environment of the process
      * @param processId A one-element array to which the process ID of the
      * started process will be written.
      * @return the file descriptor of the started process.
      *
      */
     public static native FileDescriptor createSubprocess(
-        String cmd, String arg0, String arg1, int[] processId);
+        String cmd, String[] args, String[] envVars, int[] processId);
         
     /**
      * Set the widow size for a given pty. Allows programs
@@ -57,6 +58,13 @@ public class Exec
      */
     public static native void setPtyWindowSize(FileDescriptor fd,
        int row, int col, int xpixel, int ypixel);
+
+    /**
+     * Set or clear UTF-8 mode for a given pty.  Used by the terminal driver
+     * to implement correct erase behavior in cooked mode (Linux >= 2.6.4).
+     */
+    public static native void setPtyUTF8Mode(FileDescriptor fd,
+       boolean utf8Mode);
 
     /**
      * Causes the calling thread to wait for the process associated with the
