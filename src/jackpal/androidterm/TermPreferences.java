@@ -18,8 +18,14 @@ package jackpal.androidterm;
 
 import android.os.Bundle;
 import android.preference.PreferenceActivity;
+import android.view.MenuItem;
+
+import jackpal.androidterm.compat.ActionBarCompat;
+import jackpal.androidterm.compat.ActivityCompat;
+import jackpal.androidterm.compat.AndroidCompat;
 
 public class TermPreferences extends PreferenceActivity {
+    private static final String ACTIONBAR_KEY = "actionbar";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -27,6 +33,30 @@ public class TermPreferences extends PreferenceActivity {
 
         // Load the preferences from an XML resource
         addPreferencesFromResource(R.xml.preferences);
+
+        // Disable the action bar pref on older platforms without an action bar
+        if (AndroidCompat.SDK < 11) {
+            getPreferenceManager().findPreference(ACTIONBAR_KEY).setEnabled(false);
+        }
+
+        // Display up indicator on action bar home button
+        if (AndroidCompat.SDK >= 11) {
+            ActionBarCompat bar = ActivityCompat.getActionBar(this);
+            if (bar != null) {
+                bar.setDisplayOptions(ActionBarCompat.DISPLAY_HOME_AS_UP, ActionBarCompat.DISPLAY_HOME_AS_UP);
+            }
+        }
     }
 
+    @Override
+    public boolean onOptionsItemSelected(MenuItem item) {
+        switch (item.getItemId()) {
+        case ActionBarCompat.ID_HOME:
+            // Action bar home button selected
+            finish();
+            return true;
+        default:
+            return super.onOptionsItemSelected(item);
+        }
+    }
 }

@@ -16,21 +16,20 @@
 
 package jackpal.androidterm;
 
-import java.util.ArrayList;
-
 import android.app.Service;
 import android.os.Binder;
 import android.os.IBinder;
 import android.content.Intent;
 import android.util.Log;
 import android.app.Notification;
-import android.app.NotificationManager;
 import android.app.PendingIntent;
 
-import jackpal.androidterm.session.TermSession;
-import jackpal.androidterm.util.ServiceForegroundCompat;
+import jackpal.androidterm.emulatorview.TermSession;
 
-public class TermService extends Service
+import jackpal.androidterm.compat.ServiceForegroundCompat;
+import jackpal.androidterm.util.SessionList;
+
+public class TermService extends Service implements TermSession.FinishCallback
 {
     /* Parallels the value of START_STICKY on API Level >= 5 */
     private static final int COMPAT_START_STICKY = 1;
@@ -38,7 +37,7 @@ public class TermService extends Service
     private static final int RUNNING_NOTIFICATION = 1;
     private ServiceForegroundCompat compat;
 
-    private ArrayList<TermSession> mTermSessions;
+    private SessionList mTermSessions;
 
     public class TSBinder extends Binder {
         TermService getService() {
@@ -66,7 +65,7 @@ public class TermService extends Service
     @Override
     public void onCreate() {
         compat = new ServiceForegroundCompat(this);
-        mTermSessions = new ArrayList<TermSession>();
+        mTermSessions = new SessionList();
 
         /* Put the service in the foreground. */
         Notification notification = new Notification(R.drawable.ic_stat_service_notification_icon, getText(R.string.service_notify_text), System.currentTimeMillis());
@@ -76,7 +75,7 @@ public class TermService extends Service
         PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, notifyIntent, 0);
         notification.setLatestEventInfo(this, getText(R.string.application_terminal), getText(R.string.service_notify_text), pendingIntent);
         compat.startForeground(RUNNING_NOTIFICATION, notification);
-        
+
         Log.d(TermDebug.LOG_TAG, "TermService started");
         return;
     }
@@ -85,13 +84,21 @@ public class TermService extends Service
     public void onDestroy() {
         compat.stopForeground(true);
         for (TermSession session : mTermSessions) {
+            /* Don't automatically remove from list of sessions -- we clear the
+             * list below anyway and we could trigger
+             * ConcurrentModificationException if we do */
+            session.setFinishCallback(null);
             session.finish();
         }
         mTermSessions.clear();
         return;
     }
 
-    public ArrayList<TermSession> getSessions() {
+    public SessionList getSessions() {
         return mTermSessions;
+    }
+
+    public void onSessionFinish(TermSession session) {
+        mTermSessions.remove(session);
     }
 }
